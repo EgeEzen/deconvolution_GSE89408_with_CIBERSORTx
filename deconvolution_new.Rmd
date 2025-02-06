@@ -1,0 +1,249 @@
+---
+output: html_document
+---
+
+# Deconvolution script
+
+An example signature matrix from CIBERSORTX LM22 looks like this:
+
+```{r ,warning=FALSE}
+library(knitr)
+setwd("~/Desktop/PhD/2024 Second Term/deconvolution")
+
+LM22<- read.delim("LM22.txt")
+kable(head(LM22[,1:5]))
+```
+
+preparing signature matrix from celina's analysis for synovium and loading raw counts
+
+```{r}
+raw_counts_from_scRNA <- read.csv("from celina new/rstudio-export/gene_raw_counts_per_cell_type.csv") 
+cell_markers_all <- read.csv("from celina new/Cell_type_markers.csv")
+kable(head(cell_markers_all))
+unique(cell_markers_all$annotation)
+
+#we will pick top 25 and top 50 genes for each cluster
+#only T cells, Fibroblasts, Endothelial, B cells and Myeloids will be taken into account
+cell_markers_top50 <- data.frame(gene = character(), annotation=character())
+cell_markers_top25 <- data.frame(gene = character(), annotation=character())
+cell_type_vector <- c("Myeloid cells", "Fibroblasts", "T cells", "Endothelial cells", "B cells")
+
+for (cell_type in cell_type_vector) {
+  cell_markers_top50 <- rbind(cell_markers_top50, cell_markers_all[cell_markers_all$annotation == cell_type, c("gene","annotation") ][1:50,])
+  cell_markers_top25 <- rbind(cell_markers_top25, cell_markers_all[cell_markers_all$annotation == cell_type, c("gene","annotation") ][1:25,] )
+}
+unique(cell_markers_top50$annotation)
+
+```
+
+now we have to check if the genes representing the cell types are unique to cell types
+
+```{r}
+#for top 25
+all_unique <- length(cell_markers_top25$gene) == length(unique(cell_markers_top25$gene))
+all_unique
+duplicates <- cell_markers_top25$gene[duplicated(cell_markers_top25$gene)]
+duplicates
+# which cell type has this marker gene more? 
+for (dup in duplicates){
+  kable(cell_markers_all[cell_markers_all$gene == dup,])
+}
+
+#more in T cells so we delete it from the B cells
+cell_markers_top25 <- cell_markers_top25[! (cell_markers_top25$gene == duplicates[1] & cell_markers_top25$annotation =="B cells"),] 
+
+#for top 50
+all_unique <- length(cell_markers_top50$gene) == length(unique(cell_markers_top50$gene))
+print(all_unique)
+duplicates <- cell_markers_top50$gene[duplicated(cell_markers_top50$gene)]
+print(duplicates)
+
+#manually checked and all of them are more in T cells compared to B cells
+for (dup in duplicates) {
+  cell_markers_top50 <- cell_markers_top50[!(cell_markers_top50$gene == dup & cell_markers_top50$annotation =="B cells"),] 
+
+}
+
+```
+
+raw counts are 'processed' so we have to turn them back to integers
+
+```{r}
+raw_counts_from_scRNA[, -1] <- lapply(raw_counts_from_scRNA[, -1], function(x) round(x))
+kable(head(raw_counts_from_scRNA[,1:5])) 
+```
+
+merge the cell marker genes with the raw counts
+
+```{r}
+#signature matrix for top 25
+signature_matrix_top25 <- raw_counts_from_scRNA[raw_counts_from_scRNA$Gene %in% cell_markers_top25$gene,]
+colnames(signature_matrix_top25)
+signature_matrix_top25 <- signature_matrix_top25[,c("Gene","B.cells","Endothelial.cells","Fibroblasts","Myeloid.cells","T.cells")]
+nrow(signature_matrix_top25)
+nrow(cell_markers_top25)
+#none of the genes are lost :)
+
+#signature matrix for top 50
+signature_matrix_top50 <- raw_counts_from_scRNA[raw_counts_from_scRNA$Gene %in% cell_markers_top50$gene,]
+signature_matrix_top50 <- signature_matrix_top50[,c("Gene","B.cells","Endothelial.cells","Fibroblasts","Myeloid.cells","T.cells")]
+
+nrow(signature_matrix_top50)
+nrow(cell_markers_top50)
+
+```
+
+we do CPM normalization 
+
+```{r}
+cpm_normalization <- function(df) { 
+  total_counts <- colSums(df[,-1]) # Total counts for each column 
+  cpm_normalized <- t(t(df[,-1]) /total_counts * 1e6) # Normalize and scale 
+  df[,-1] <- cpm_normalized
+  return (df) 
+  }
+
+signature_matrix_top25 <- cpm_normalization(signature_matrix_top25)
+signature_matrix_top50 <- cpm_normalization(signature_matrix_top50)
+
+```
+read bulk rna raw data 
+
+```{r}
+# count matrix of GSE89408
+ #this doesnt have the raw counts for some reason, we will only get the column names
+count_matrix <- read.delim("bulk_raw_data/GSE89408_GEO_count_matrix_rename.txt") 
+column_names_to_append <- colnames(count_matrix[2:ncol(count_matrix)])
+
+#create a list 
+gsm_ids <- paste0("GSM", 2370970:2371187)
+gsm_list <- setNames(as.list(column_names_to_append), gsm_ids) #kind of a dictionary in python
+
+#this one has the raw data (from new feature of GEO)
+count_matrix <- read.delim("bulk_raw_data/GSE89408_raw_counts_GRCh38.p13_NCBI.tsv")
+old_colnames <- colnames(count_matrix)
+new_colnames <- old_colnames  # Copy to keep structure
+
+#update the column names
+for (i in 2:length(old_colnames)) {
+  if (old_colnames[i] %in% names(gsm_list)) {
+    new_colnames[i] <- gsm_list[[old_colnames[i]]]
+  }
+}
+colnames(count_matrix) <- new_colnames
+
+#change from GeneID to hgnc symbols
+geneids <- read.delim("bulk_raw_data/Human.GRCh38.p13.annot 2.tsv")
+geneids <- geneids[c(1,2)]
+
+count_matrix <- merge(geneids, count_matrix, by = "GeneID", all.y = TRUE)
+
+all_unique <- length(count_matrix$Symbol) == length(unique(count_matrix$Symbol))
+print(all_unique)
+
+duplicates <- count_matrix$Symbol[duplicated(count_matrix$Symbol)]
+
+print(duplicates)
+```
+for some reason trnav-cac is represented 3 times 
+
+```{r}
+kable(count_matrix[count_matrix$Symbol == "TRNAV-CAC",])
+
+#I will get rid of the first and third one -> less reads mapped 
+
+count_matrix <- count_matrix[-c(37317,37405),]
+all_unique <- length(count_matrix$Symbol) == length(unique(count_matrix$Symbol))
+print(all_unique)
+
+count_matrix$GeneID <- NULL
+colnames(count_matrix)[colnames(count_matrix) == "Symbol"] <- "Gene"
+count_matrix_normalized <- cpm_normalization(count_matrix)
+#now it is ready
+```
+now that count matrix is ready we make the signature matrix genes comparable to this
+
+update gene names (everything to hgnc symbol)
+
+```{r, warning =FALSE}
+library(biomaRt)
+library(dplyr)
+
+# Connect to the Ensembl database
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Retrieve updated gene names
+gene_synonyms <- getBM(
+  attributes = c("hgnc_symbol", "external_synonym"),
+  filters = "external_synonym",
+  values = count_matrix$Gene,
+  mart = ensembl
+) #this gets all synonyms
+
+#some hgnc symbols are lacking so get rid of them
+#this is VERY cruical: some synoyms map to more than one hgnc symbols, almost always the first one is the true one
+gene_synonyms_updated <- gene_synonyms[gene_synonyms$hgnc_symbol !="",]
+gene_synonyms_updated <- gene_synonyms_updated %>%
+  distinct(external_synonym, .keep_all = TRUE)
+gene_synonyms_updated <- gene_synonyms_updated %>%
+  distinct(hgnc_symbol, .keep_all = TRUE)
+```
+
+update the names of the genes in signature matrixes
+
+```{r}
+update_name <- function(df){
+  
+  gene_synonyms_updated_unique <- gene_synonyms_updated[!(gene_synonyms_updated$hgnc_symbol %in% df$Gene),]
+  
+  df <- merge(
+    df, 
+    gene_synonyms_updated_unique, 
+    by.x = "Gene", 
+    by.y = "external_synonym",  # Matching based on synonym
+    all.x = TRUE                  # Keep all rows from count_matrix
+  )
+  
+  # update the gene names
+  df$Gene <- ifelse(
+    !is.na(df$hgnc_symbol),  # if hgnc symbol is available
+    df$hgnc_symbol,         # replace 
+    df$Gene                 # keep the original name 
+  )
+  
+  df$hgnc_symbol <- NULL
+
+  return (df)
+}
+
+signature_matrix_top25 <- update_name(signature_matrix_top25)
+signature_matrix_top50 <- update_name(signature_matrix_top50)
+
+```
+
+we *can* now check if every gene is in count matrix (of course not)
+
+```{r}
+df_merged <- merge(signature_matrix_top50, count_matrix_normalized, by = "Gene", all.x = TRUE) 
+
+na_rows <- df_merged[rowSums(is.na(df_merged)) > 0, ]
+kable(na_rows[,1], caption = "genes not present in count data")
+```
+
+these were manually checked and only one of them can be modified, other than that nothing left to do here
+
+```{r}
+signature_matrix_top50[signature_matrix_top50$Gene == "PALM2-AKAP2",]$Gene <- "PALM2AKAP2"
+
+```
+
+
+now we can save count_matrix and signature_matrixes for cibersortx
+
+```{r}
+#write.table(signature_matrix_top25, "for_input/signature_matrix_top25_synovium.txt", sep ="\t", row.names = FALSE, quote = FALSE) 
+#write.table(signature_matrix_top50, "for_input/signature_matrix_top50_synovium.txt", sep ="\t", row.names = FALSE, quote = FALSE) 
+#write.table(count_matrix_normalized,"for_input/count_matrix_GSE89408_normalized.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+#write.table(count_matrix,"for_input/count_matrix_GSE89408.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+```

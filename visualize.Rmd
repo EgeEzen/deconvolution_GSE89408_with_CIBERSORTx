@@ -1,0 +1,223 @@
+#Visualization for Deconvolution
+
+From the CIBERSORTX deconvolution we visualize the cell proportions
+```{r,echo=FALSE,warning=FALSE}
+library(tidyr)
+library(ggplot2)
+library(RColorBrewer)
+library(tidyverse)
+library(rmarkdown)
+library(knitr)
+library(ggh4x)
+
+```
+First organize the data
+```{r}
+setwd("~/Desktop/PhD/2024 Second Term/deconvolution")
+data <- read.delim("results/CIBERSORTx_signature_matrix_top50.txt")
+colnames(data)
+colnames(data) <- c("Mixture","B cells","Endothelial Cells","Fibroblasts","Myeloid Cells","T cells","pvalue","correlation","rmse")
+
+data <- data %>%
+  mutate(Category = case_when(
+    str_detect(Mixture, "normal") ~ "Healthy",
+    str_detect(Mixture, "OA") ~ "OA",
+    str_detect(Mixture, "RA") ~ "RA",
+    TRUE ~ "Other"
+  ))
+
+# Reshape data to long format
+long_data <- data %>%
+  pivot_longer(cols = 'B cells':'T cells', names_to = "CellType", values_to = "Proportion")
+
+kable(head(long_data))
+
+```
+Because of the low T cell population we combine t cells and b cells and call them lymphoids
+```{r}
+long_data_combined <- long_data %>%
+  mutate(CellType = case_when(
+    CellType %in% c("B cells", "T cells") ~ "Lymphoids",
+    TRUE ~ CellType
+  )) %>%
+  group_by(Mixture, Category, CellType) %>%
+  summarise(Proportion = sum(Proportion), .groups = "drop")
+```
+
+Visualize the data with bar plots
+
+For healthy
+```{r}
+# Stacked bar plot
+stacked_bar <- function(df,patient_string) {
+  p <- ggplot(df[df$Category == patient_string,], aes(x = Mixture, y = Proportion, fill = CellType)) +
+    geom_bar(stat = "identity") +
+    scale_fill_brewer(palette = "Set2") +
+    labs(
+      title = "Cell Type Proportions",
+      x = "Tissue Samples",
+      y = "Proportion"
+    ) +
+    theme_minimal() +
+    theme(axis.ticks.x=element_blank(),axis.text.x=element_blank()) 
+  
+  return(p)
+}
+
+plot_healthy <- stacked_bar(long_data,"Healthy")
+plot_healthy_combined <- stacked_bar(long_data_combined,"Healthy")
+plot_healthy_combined
+```
+For OA
+```{r}
+plot_oa <- stacked_bar(long_data,"OA")
+plot_oa_combined <- stacked_bar(long_data_combined,"OA")
+
+plot_oa_combined
+```
+For RA
+```{r}
+plot_ra <- stacked_bar(long_data,"RA")
+plot_ra_combined <- stacked_bar(long_data_combined,"RA")
+plot_ra_combined
+```
+
+Save plots
+```{r}
+#saving the plot
+save_plot <- function(p_h, p_oa, p_ra) {
+ggsave(
+  plot = p_h,
+  filename = "figures/combined/Healthy_top50.png",
+  bg = "white",
+  width = 7, height = 6
+)
+ggsave(
+  plot = p_oa,
+  filename = "figures/combined/OA_top50.png",
+  bg = "white",
+  width = 7, height = 6
+)
+ggsave(
+  plot = p_ra,
+  filename = "figures/combined/RA_top50.png",
+  bg = "white",
+  width = 12, height = 6
+)
+}
+
+save_plot(plot_healthy_combined,plot_oa_combined,plot_ra_combined)
+```
+
+We can group the cells into three
+
+```{r}
+# Calculate the sum of Myeloid Cells and Lymphoids
+long_data_groups <- long_data_combined %>%
+  group_by(Mixture, Category) %>%
+  mutate(ImmuneCellProportion = sum(Proportion[CellType %in% c("Myeloid Cells", "Lymphoids")])) %>%
+  ungroup()
+
+long_data_groups <- long_data_groups %>%
+  mutate(ImmuneCategory = case_when(
+    ImmuneCellProportion < 0.34 ~ "Pauci-immune",
+    ImmuneCellProportion >= 0.34 & ImmuneCellProportion <= 0.50 ~ "Moderately\ninfiltrated",
+    ImmuneCellProportion > 0.50 ~ "Immune\ncell-dominant",
+    TRUE ~ "Other"
+  ))
+
+long_data_groups$ImmuneCategory <- factor(long_data_groups$ImmuneCategory, 
+                                           levels = c("Pauci-immune", "Moderately\ninfiltrated", "Immune\ncell-dominant"))
+
+write.csv(long_data_groups, "after_deconvolution_bulk_rna.csv")
+```
+
+Then visualize them
+
+```{r}
+stacked_bar_groups <- function(df,patient_string) {
+  
+  # Set up the plot with ggplot
+  p <- ggplot(df[df$Category == patient_string,], aes(x = Mixture, y = Proportion, fill = CellType)) +
+    geom_bar(stat = "identity") +  
+    scale_fill_brewer(palette = "Set2") +  
+    facet_wrap(~ ImmuneCategory, scales = "free_x") +  # Separate by ImmuneCategory
+    labs(
+      title = "Cell Type Proportions by Immune Category",
+      x = "Tissue Samples",
+      y = "Proportion"
+    ) +
+    theme_minimal() + 
+    theme(axis.ticks.x = element_blank(), axis.text.x = element_blank(), panel.grid = element_blank())  
+  # Return the plot
+  return(p)
+}
+
+healthy_groups_plot <- stacked_bar_groups(long_data_groups, "Healthy")
+healthy_groups_plot
+```
+adjusting the widths 
+
+```{r}
+  #the numbers from the groups
+  c1 <- nrow(long_data_groups[long_data_groups$Category == "Healthy" & long_data_groups$ImmuneCategory == "Pauci-immune",])/4
+  c2 <- nrow(long_data_groups[long_data_groups$Category == "Healthy" ,])/4 - c1
+  
+  #adjust the widths
+  healthy_groups_plot_adjusted <- healthy_groups_plot + force_panelsizes(cols = c(c1,c2)) 
+  healthy_groups_plot_adjusted
+  
+  ggsave(
+  plot = healthy_groups_plot_adjusted,
+  filename = "figures/combined/healthy_grouped.png",
+  bg = "white",
+  width = 12, height = 6
+)
+
+```
+
+same for oa 
+
+```{r}
+OA_groups_plot <- stacked_bar_groups(long_data_groups, "OA")
+
+#the numbers from the groups
+c1 <- nrow(long_data_groups[long_data_groups$Category == "OA" & long_data_groups$ImmuneCategory == "Pauci-immune",])/4
+c2 <- nrow(long_data_groups[long_data_groups$Category == "OA" & long_data_groups$ImmuneCategory == "Moderately\ninfiltrated",])/4
+c3 <- nrow(long_data_groups[long_data_groups$Category == "OA" ,])/4 - c1 - c2 
+  
+# re draw it
+OA_groups_plot_adjusted <- OA_groups_plot + force_panelsizes(cols = c(c1,c2,c3)) 
+OA_groups_plot_adjusted
+
+  ggsave(
+  plot = OA_groups_plot_adjusted,
+  filename = "figures/combined/OA_grouped.png",
+  bg = "white",
+  width = 12, height = 6
+)
+
+  
+```
+finally for ra 
+
+```{r}
+RA_groups_plot <- stacked_bar_groups(long_data_groups, "RA")
+
+#the numbers from the groups
+c1 <- nrow(long_data_groups[long_data_groups$Category == "RA" & long_data_groups$ImmuneCategory == "Pauci-immune",])/4
+c2 <- nrow(long_data_groups[long_data_groups$Category == "RA" & long_data_groups$ImmuneCategory == "Moderately\ninfiltrated",])/4
+c3 <- nrow(long_data_groups[long_data_groups$Category == "RA" ,])/4 - c1 - c2 
+  
+# re draw it
+RA_groups_plot_adjusted <- RA_groups_plot + force_panelsizes(cols = c(c1,c2,c3)) 
+RA_groups_plot_adjusted
+
+  ggsave(
+  plot = RA_groups_plot_adjusted,
+  filename = "figures/combined/RA_grouped.png",
+  bg = "white",
+  width = 16, height = 6
+)
+```
+
